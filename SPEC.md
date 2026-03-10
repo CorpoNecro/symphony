@@ -2100,7 +2100,7 @@ Use the same validation profiles as Section 17:
   implementation details.
 - TODO: Add first-class tracker write APIs (comments/state transitions) in the orchestrator instead
   of only via agent tools.
-- TODO: Add pluggable issue tracker adapters beyond Linear.
+- ClickUp adapter available via `tracker.kind: clickup` in workflow front matter (REST API v2).
 
 ### 18.3 Operational Validation Before Production (Recommended)
 

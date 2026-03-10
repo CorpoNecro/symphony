@@ -1,0 +1,510 @@
+defmodule SymphonyElixir.ClickUp.Client do
+  @moduledoc """
+  REST client for polling ClickUp tasks from a configured list.
+  """
+
+  require Logger
+  alias SymphonyElixir.{Config, Tracker.Issue}
+
+  @task_page_size 100
+  @max_error_body_log_bytes 1_000
+
+  @spec fetch_candidate_issues() :: {:ok, [Issue.t()]} | {:error, term()}
+  def fetch_candidate_issues do
+    list_id = Config.clickup_list_id()
+
+    cond do
+      is_nil(Config.clickup_api_token()) ->
+        {:error, :missing_clickup_api_token}
+
+      is_nil(list_id) ->
+        {:error, :missing_clickup_list_id}
+
+      true ->
+        with {:ok, assignee_filter} <- routing_assignee_filter() do
+          do_fetch_by_statuses(list_id, Config.clickup_active_states(), assignee_filter)
+        end
+    end
+  end
+
+  @spec fetch_issues_by_states([String.t()]) :: {:ok, [Issue.t()]} | {:error, term()}
+  def fetch_issues_by_states(state_names) when is_list(state_names) do
+    normalized = Enum.map(state_names, &to_string/1) |> Enum.uniq()
+
+    if normalized == [] do
+      {:ok, []}
+    else
+      list_id = Config.clickup_list_id()
+
+      cond do
+        is_nil(Config.clickup_api_token()) ->
+          {:error, :missing_clickup_api_token}
+
+        is_nil(list_id) ->
+          {:error, :missing_clickup_list_id}
+
+        true ->
+          do_fetch_by_statuses(list_id, normalized, nil)
+      end
+    end
+  end
+
+  @spec fetch_issue_states_by_ids([String.t()]) :: {:ok, [Issue.t()]} | {:error, term()}
+  def fetch_issue_states_by_ids(issue_ids) when is_list(issue_ids) do
+    ids = Enum.uniq(issue_ids)
+
+    case ids do
+      [] ->
+        {:ok, []}
+
+      ids ->
+        with {:ok, assignee_filter} <- routing_assignee_filter() do
+          do_fetch_tasks_by_ids(ids, assignee_filter)
+        end
+    end
+  end
+
+  @spec create_comment(String.t(), String.t()) :: :ok | {:error, term()}
+  def create_comment(task_id, body) when is_binary(task_id) and is_binary(body) do
+    case api_request(:post, "/task/#{task_id}/comment", %{comment_text: body}) do
+      {:ok, %{status: status}} when status in 200..299 ->
+        :ok
+
+      {:ok, response} ->
+        Logger.error(
+          "ClickUp create comment failed status=#{response.status}" <>
+            error_context(response)
+        )
+
+        {:error, :comment_create_failed}
+
+      {:error, reason} ->
+        Logger.error("ClickUp create comment failed: #{inspect(reason)}")
+        {:error, {:clickup_api_request, reason}}
+    end
+  end
+
+  @spec update_task_status(String.t(), String.t()) :: :ok | {:error, term()}
+  def update_task_status(task_id, status_name) when is_binary(task_id) and is_binary(status_name) do
+    case api_request(:put, "/task/#{task_id}", %{status: status_name}) do
+      {:ok, %{status: status}} when status in 200..299 ->
+        :ok
+
+      {:ok, response} ->
+        Logger.error(
+          "ClickUp update task status failed status=#{response.status}" <>
+            error_context(response)
+        )
+
+        {:error, :issue_update_failed}
+
+      {:error, reason} ->
+        Logger.error("ClickUp update task status failed: #{inspect(reason)}")
+        {:error, {:clickup_api_request, reason}}
+    end
+  end
+
+  @spec api_request(atom(), String.t(), map() | nil, keyword()) :: {:ok, Req.Response.t()} | {:error, term()}
+  def api_request(method, path, body \\ nil, opts \\ []) do
+    request_fun = Keyword.get(opts, :request_fun, &do_request/3)
+
+    case auth_headers() do
+      {:ok, headers} ->
+        url = build_url(path)
+        request_fun.(method, url, %{headers: headers, body: body})
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  @doc false
+  @spec normalize_task_for_test(map()) :: Issue.t() | nil
+  def normalize_task_for_test(task) when is_map(task) do
+    normalize_task(task, nil)
+  end
+
+  @doc false
+  @spec normalize_task_for_test(map(), String.t() | nil) :: Issue.t() | nil
+  def normalize_task_for_test(task, assignee) when is_map(task) do
+    assignee_filter =
+      case assignee do
+        value when is_binary(value) ->
+          case build_assignee_filter(value) do
+            {:ok, filter} -> filter
+            {:error, _reason} -> nil
+          end
+
+        _ ->
+          nil
+      end
+
+    normalize_task(task, assignee_filter)
+  end
+
+  # -- Private: Fetching --
+
+  defp do_fetch_by_statuses(list_id, status_names, assignee_filter) do
+    do_fetch_by_statuses_page(list_id, status_names, assignee_filter, 0, [])
+  end
+
+  defp do_fetch_by_statuses_page(list_id, status_names, assignee_filter, page, acc) do
+    query_string = build_task_query_string(page, status_names)
+
+    case api_request(:get, "/list/#{list_id}/task?#{query_string}") do
+      {:ok, %{status: 200, body: body}} ->
+        case decode_task_list_response(body, assignee_filter) do
+          {:ok, tasks} ->
+            updated_acc = Enum.reverse(tasks, acc)
+
+            if length(tasks) >= @task_page_size do
+              do_fetch_by_statuses_page(list_id, status_names, assignee_filter, page + 1, updated_acc)
+            else
+              {:ok, Enum.reverse(updated_acc)}
+            end
+
+          {:error, reason} ->
+            {:error, reason}
+        end
+
+      {:ok, response} ->
+        Logger.error(
+          "ClickUp fetch tasks failed status=#{response.status}" <>
+            error_context(response)
+        )
+
+        {:error, {:clickup_api_status, response.status}}
+
+      {:error, reason} ->
+        Logger.error("ClickUp fetch tasks failed: #{inspect(reason)}")
+        {:error, {:clickup_api_request, reason}}
+    end
+  end
+
+  defp build_task_query_string(page, status_names) do
+    base_params = [
+      {"page", to_string(page)},
+      {"include_closed", "true"},
+      {"subtasks", "true"}
+    ]
+
+    status_params =
+      Enum.map(status_names, fn status -> {"statuses[]", status} end)
+
+    (base_params ++ status_params)
+    |> URI.encode_query(:rfc3986)
+  end
+
+  defp do_fetch_tasks_by_ids(ids, assignee_filter) do
+    tasks =
+      ids
+      |> Task.async_stream(
+        fn id -> fetch_single_task(id) end,
+        max_concurrency: 5,
+        timeout: 30_000,
+        on_timeout: :kill_task
+      )
+      |> Enum.reduce([], fn
+        {:ok, {:ok, task}}, acc -> [task | acc]
+        {:ok, {:error, reason}}, _acc -> throw({:fetch_error, reason})
+        {:exit, _reason}, _acc -> throw({:fetch_error, :task_fetch_timeout})
+      end)
+      |> Enum.reverse()
+      |> Enum.map(&normalize_task(&1, assignee_filter))
+      |> Enum.reject(&is_nil/1)
+
+    {:ok, tasks}
+  catch
+    {:fetch_error, reason} -> {:error, reason}
+  end
+
+  defp fetch_single_task(task_id) do
+    case api_request(:get, "/task/#{task_id}") do
+      {:ok, %{status: 200, body: body}} when is_map(body) ->
+        {:ok, body}
+
+      {:ok, %{status: 200, body: body}} when is_binary(body) ->
+        case Jason.decode(body) do
+          {:ok, decoded} -> {:ok, decoded}
+          {:error, _reason} -> {:error, :clickup_invalid_json}
+        end
+
+      {:ok, response} ->
+        {:error, {:clickup_api_status, response.status}}
+
+      {:error, reason} ->
+        {:error, {:clickup_api_request, reason}}
+    end
+  end
+
+  # -- Private: Response decoding --
+
+  defp decode_task_list_response(%{"tasks" => tasks}, assignee_filter) when is_list(tasks) do
+    issues =
+      tasks
+      |> Enum.map(&normalize_task(&1, assignee_filter))
+      |> Enum.reject(&is_nil/1)
+
+    {:ok, issues}
+  end
+
+  defp decode_task_list_response(body, _assignee_filter) when is_binary(body) do
+    case Jason.decode(body) do
+      {:ok, decoded} -> decode_task_list_response(decoded, nil)
+      {:error, _reason} -> {:error, :clickup_invalid_json}
+    end
+  end
+
+  defp decode_task_list_response(_unknown, _assignee_filter) do
+    {:error, :clickup_unknown_payload}
+  end
+
+  # -- Private: Task normalization --
+
+  defp normalize_task(task, assignee_filter) when is_map(task) do
+    assignees = task["assignees"] || []
+    primary_assignee = List.first(assignees)
+
+    %Issue{
+      id: to_string(task["id"]),
+      identifier: task["custom_id"] || to_string(task["id"]),
+      title: task["name"],
+      description: task["text_content"] || task["description"],
+      priority: parse_priority(task["priority"]),
+      state: get_in(task, ["status", "status"]),
+      branch_name: nil,
+      url: task["url"],
+      assignee_id: assignee_field(primary_assignee, "id"),
+      blocked_by: extract_dependencies(task),
+      labels: extract_tags(task),
+      assigned_to_worker: assigned_to_worker?(primary_assignee, assignee_filter),
+      created_at: parse_unix_ms(task["date_created"]),
+      updated_at: parse_unix_ms(task["date_updated"])
+    }
+  end
+
+  defp normalize_task(_task, _assignee_filter), do: nil
+
+  defp assignee_field(%{} = assignee, field), do: to_string(assignee[field] || "")
+  defp assignee_field(_, _field), do: nil
+
+  defp assigned_to_worker?(_assignee, nil), do: true
+
+  defp assigned_to_worker?(%{} = assignee, %{match_values: match_values})
+       when is_struct(match_values, MapSet) do
+    case normalize_assignee_match_value(to_string(assignee["id"] || "")) do
+      nil -> false
+      assignee_id -> MapSet.member?(match_values, assignee_id)
+    end
+  end
+
+  defp assigned_to_worker?(_assignee, _assignee_filter), do: false
+
+  defp extract_tags(%{"tags" => tags}) when is_list(tags) do
+    tags
+    |> Enum.map(& &1["name"])
+    |> Enum.reject(&is_nil/1)
+    |> Enum.map(&String.downcase/1)
+  end
+
+  defp extract_tags(_), do: []
+
+  defp extract_dependencies(%{"dependencies" => deps}) when is_list(deps) do
+    Enum.flat_map(deps, fn
+      %{"task_id" => task_id, "depends_on" => depends_on_id}
+      when is_binary(task_id) and is_binary(depends_on_id) ->
+        [
+          %{
+            id: depends_on_id,
+            identifier: depends_on_id,
+            state: nil
+          }
+        ]
+
+      _ ->
+        []
+    end)
+  end
+
+  defp extract_dependencies(_), do: []
+
+  defp parse_priority(%{"id" => id}) when is_binary(id) do
+    case Integer.parse(id) do
+      {priority, _} -> priority
+      :error -> nil
+    end
+  end
+
+  defp parse_priority(%{"id" => id}) when is_integer(id), do: id
+  defp parse_priority(_), do: nil
+
+  defp parse_unix_ms(nil), do: nil
+
+  defp parse_unix_ms(ms) when is_binary(ms) do
+    case Integer.parse(ms) do
+      {unix_ms, _} -> DateTime.from_unix!(unix_ms, :millisecond)
+      :error -> nil
+    end
+  end
+
+  defp parse_unix_ms(ms) when is_integer(ms) do
+    DateTime.from_unix!(ms, :millisecond)
+  end
+
+  defp parse_unix_ms(_), do: nil
+
+  # -- Private: Auth & HTTP --
+
+  defp auth_headers do
+    case Config.clickup_api_token() do
+      nil ->
+        {:error, :missing_clickup_api_token}
+
+      token ->
+        {:ok,
+         [
+           {"Authorization", token},
+           {"Content-Type", "application/json"}
+         ]}
+    end
+  end
+
+  defp build_url(path) do
+    base = Config.clickup_endpoint()
+    String.trim_trailing(base, "/") <> path
+  end
+
+  defp do_request(:get, url, %{headers: headers}) do
+    Req.get(url,
+      headers: headers,
+      connect_options: [timeout: 30_000]
+    )
+  end
+
+  defp do_request(:post, url, %{headers: headers, body: body}) do
+    Req.post(url,
+      headers: headers,
+      json: body || %{},
+      connect_options: [timeout: 30_000]
+    )
+  end
+
+  defp do_request(:put, url, %{headers: headers, body: body}) do
+    Req.put(url,
+      headers: headers,
+      json: body || %{},
+      connect_options: [timeout: 30_000]
+    )
+  end
+
+  # -- Private: Assignee filtering --
+
+  defp routing_assignee_filter do
+    case Config.clickup_assignee() do
+      nil ->
+        {:ok, nil}
+
+      assignee ->
+        build_assignee_filter(assignee)
+    end
+  end
+
+  defp build_assignee_filter(assignee) when is_binary(assignee) do
+    case normalize_assignee_match_value(assignee) do
+      nil ->
+        {:ok, nil}
+
+      "me" ->
+        resolve_viewer_assignee_filter()
+
+      normalized ->
+        {:ok, %{configured_assignee: assignee, match_values: MapSet.new([normalized])}}
+    end
+  end
+
+  defp resolve_viewer_assignee_filter do
+    case api_request(:get, "/team") do
+      {:ok, %{status: 200, body: %{"teams" => [team | _]}}} ->
+        members = team["members"] || []
+
+        case find_current_user_id(members) do
+          nil ->
+            {:error, :missing_clickup_viewer_identity}
+
+          viewer_id ->
+            {:ok, %{configured_assignee: "me", match_values: MapSet.new([viewer_id])}}
+        end
+
+      {:ok, %{status: 200, body: body}} when is_binary(body) ->
+        case Jason.decode(body) do
+          {:ok, %{"teams" => [team | _]}} ->
+            members = team["members"] || []
+
+            case find_current_user_id(members) do
+              nil -> {:error, :missing_clickup_viewer_identity}
+              viewer_id -> {:ok, %{configured_assignee: "me", match_values: MapSet.new([viewer_id])}}
+            end
+
+          _ ->
+            {:error, :missing_clickup_viewer_identity}
+        end
+
+      {:ok, _body} ->
+        {:error, :missing_clickup_viewer_identity}
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  defp find_current_user_id(_members) do
+    # ClickUp's /team endpoint returns members but doesn't directly indicate
+    # the current user. When team_id is set, we use it to identify the workspace.
+    # For "me" filtering, users should specify their numeric user ID or email
+    # in the assignee field instead of "me".
+    # This is a limitation compared to Linear's viewer query.
+    nil
+  end
+
+  defp normalize_assignee_match_value(value) when is_binary(value) do
+    case String.trim(value) do
+      "" -> nil
+      normalized -> normalized
+    end
+  end
+
+  defp normalize_assignee_match_value(_value), do: nil
+
+  # -- Private: Error helpers --
+
+  defp error_context(response) do
+    body =
+      response
+      |> Map.get(:body)
+      |> summarize_error_body()
+
+    " body=" <> body
+  end
+
+  defp summarize_error_body(body) when is_binary(body) do
+    body
+    |> String.replace(~r/\s+/, " ")
+    |> String.trim()
+    |> truncate_error_body()
+    |> inspect()
+  end
+
+  defp summarize_error_body(body) do
+    body
+    |> inspect(limit: 20, printable_limit: @max_error_body_log_bytes)
+    |> truncate_error_body()
+  end
+
+  defp truncate_error_body(body) when is_binary(body) do
+    if byte_size(body) > @max_error_body_log_bytes do
+      binary_part(body, 0, @max_error_body_log_bytes) <> "...<truncated>"
+    else
+      body
+    end
+  end
+end

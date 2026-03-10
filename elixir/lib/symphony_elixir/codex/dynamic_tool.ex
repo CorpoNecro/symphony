@@ -3,7 +3,7 @@ defmodule SymphonyElixir.Codex.DynamicTool do
   Executes client-side tool calls requested by Codex app-server turns.
   """
 
-  alias SymphonyElixir.Linear.Client
+  alias SymphonyElixir.Config
 
   @linear_graphql_tool "linear_graphql"
   @linear_graphql_description """
@@ -26,11 +26,41 @@ defmodule SymphonyElixir.Codex.DynamicTool do
     }
   }
 
+  @clickup_api_tool "clickup_api"
+  @clickup_api_description """
+  Execute a REST API request against ClickUp using Symphony's configured auth.
+  """
+  @clickup_api_input_schema %{
+    "type" => "object",
+    "additionalProperties" => false,
+    "required" => ["method", "path"],
+    "properties" => %{
+      "method" => %{
+        "type" => "string",
+        "enum" => ["GET", "POST", "PUT", "DELETE"],
+        "description" => "HTTP method for the ClickUp API request."
+      },
+      "path" => %{
+        "type" => "string",
+        "description" =>
+          "API path relative to ClickUp v2 base URL (e.g., /task/{task_id}, /list/{list_id}/task)."
+      },
+      "body" => %{
+        "type" => ["object", "null"],
+        "description" => "Optional JSON request body for POST/PUT requests.",
+        "additionalProperties" => true
+      }
+    }
+  }
+
   @spec execute(String.t() | nil, term(), keyword()) :: map()
   def execute(tool, arguments, opts \\ []) do
     case tool do
       @linear_graphql_tool ->
         execute_linear_graphql(arguments, opts)
+
+      @clickup_api_tool ->
+        execute_clickup_api(arguments, opts)
 
       other ->
         failure_response(%{
@@ -44,21 +74,45 @@ defmodule SymphonyElixir.Codex.DynamicTool do
 
   @spec tool_specs() :: [map()]
   def tool_specs do
-    [
-      %{
-        "name" => @linear_graphql_tool,
-        "description" => @linear_graphql_description,
-        "inputSchema" => @linear_graphql_input_schema
-      }
-    ]
+    case Config.tracker_kind() do
+      "clickup" ->
+        [
+          %{
+            "name" => @clickup_api_tool,
+            "description" => @clickup_api_description,
+            "inputSchema" => @clickup_api_input_schema
+          }
+        ]
+
+      _ ->
+        [
+          %{
+            "name" => @linear_graphql_tool,
+            "description" => @linear_graphql_description,
+            "inputSchema" => @linear_graphql_input_schema
+          }
+        ]
+    end
   end
 
   defp execute_linear_graphql(arguments, opts) do
-    linear_client = Keyword.get(opts, :linear_client, &Client.graphql/3)
+    linear_client = Keyword.get(opts, :linear_client, &SymphonyElixir.Linear.Client.graphql/3)
 
     with {:ok, query, variables} <- normalize_linear_graphql_arguments(arguments),
          {:ok, response} <- linear_client.(query, variables, []) do
       graphql_response(response)
+    else
+      {:error, reason} ->
+        failure_response(tool_error_payload(reason))
+    end
+  end
+
+  defp execute_clickup_api(arguments, opts) do
+    clickup_client = Keyword.get(opts, :clickup_client, &SymphonyElixir.ClickUp.Client.api_request/3)
+
+    with {:ok, method, path, body} <- normalize_clickup_api_arguments(arguments),
+         {:ok, response} <- clickup_client.(method, path, body) do
+      rest_response(response)
     else
       {:error, reason} ->
         failure_response(tool_error_payload(reason))
@@ -89,6 +143,40 @@ defmodule SymphonyElixir.Codex.DynamicTool do
   end
 
   defp normalize_linear_graphql_arguments(_arguments), do: {:error, :invalid_arguments}
+
+  defp normalize_clickup_api_arguments(arguments) when is_map(arguments) do
+    method_raw = Map.get(arguments, "method") || Map.get(arguments, :method)
+    path = Map.get(arguments, "path") || Map.get(arguments, :path)
+    body = Map.get(arguments, "body") || Map.get(arguments, :body)
+
+    with {:ok, method} <- parse_http_method(method_raw),
+         {:ok, validated_path} <- validate_path(path) do
+      {:ok, method, validated_path, body}
+    end
+  end
+
+  defp normalize_clickup_api_arguments(_arguments), do: {:error, :invalid_arguments}
+
+  defp parse_http_method(method) when is_binary(method) do
+    case String.upcase(String.trim(method)) do
+      "GET" -> {:ok, :get}
+      "POST" -> {:ok, :post}
+      "PUT" -> {:ok, :put}
+      "DELETE" -> {:ok, :delete}
+      _ -> {:error, :invalid_method}
+    end
+  end
+
+  defp parse_http_method(_), do: {:error, :missing_method}
+
+  defp validate_path(path) when is_binary(path) do
+    case String.trim(path) do
+      "" -> {:error, :missing_path}
+      trimmed -> {:ok, trimmed}
+    end
+  end
+
+  defp validate_path(_), do: {:error, :missing_path}
 
   defp normalize_query(arguments) do
     case Map.get(arguments, "query") || Map.get(arguments, :query) do
@@ -129,6 +217,32 @@ defmodule SymphonyElixir.Codex.DynamicTool do
     }
   end
 
+  defp rest_response(%{status: status, body: body}) do
+    success = status in 200..299
+
+    %{
+      "success" => success,
+      "contentItems" => [
+        %{
+          "type" => "inputText",
+          "text" => encode_payload(%{"status" => status, "body" => body})
+        }
+      ]
+    }
+  end
+
+  defp rest_response(response) do
+    %{
+      "success" => true,
+      "contentItems" => [
+        %{
+          "type" => "inputText",
+          "text" => encode_payload(response)
+        }
+      ]
+    }
+  end
+
   defp failure_response(payload) do
     %{
       "success" => false,
@@ -158,7 +272,7 @@ defmodule SymphonyElixir.Codex.DynamicTool do
   defp tool_error_payload(:invalid_arguments) do
     %{
       "error" => %{
-        "message" => "`linear_graphql` expects either a GraphQL query string or an object with `query` and optional `variables`."
+        "message" => "Tool expects a JSON object with the required parameters."
       }
     }
   end
@@ -171,10 +285,44 @@ defmodule SymphonyElixir.Codex.DynamicTool do
     }
   end
 
+  defp tool_error_payload(:missing_method) do
+    %{
+      "error" => %{
+        "message" => "`clickup_api` requires a `method` (GET, POST, PUT, DELETE)."
+      }
+    }
+  end
+
+  defp tool_error_payload(:invalid_method) do
+    %{
+      "error" => %{
+        "message" => "`clickup_api.method` must be one of GET, POST, PUT, DELETE."
+      }
+    }
+  end
+
+  defp tool_error_payload(:missing_path) do
+    %{
+      "error" => %{
+        "message" => "`clickup_api` requires a non-empty `path` string."
+      }
+    }
+  end
+
   defp tool_error_payload(:missing_linear_api_token) do
     %{
       "error" => %{
-        "message" => "Symphony is missing Linear auth. Set `linear.api_key` in `WORKFLOW.md` or export `LINEAR_API_KEY`."
+        "message" =>
+          "Symphony is missing Linear auth. Set `linear.api_key` in `WORKFLOW.md` or export `LINEAR_API_KEY`."
+      }
+    }
+  end
+
+  defp tool_error_payload(:missing_clickup_api_token) do
+    %{
+      "error" => %{
+        "message" =>
+          "Symphony is missing ClickUp auth. Set `tracker.api_key` in `WORKFLOW.md` or export `CLICKUP_API_KEY`."
       }
     }
   end
@@ -197,10 +345,28 @@ defmodule SymphonyElixir.Codex.DynamicTool do
     }
   end
 
+  defp tool_error_payload({:clickup_api_status, status}) do
+    %{
+      "error" => %{
+        "message" => "ClickUp API request failed with HTTP #{status}.",
+        "status" => status
+      }
+    }
+  end
+
+  defp tool_error_payload({:clickup_api_request, reason}) do
+    %{
+      "error" => %{
+        "message" => "ClickUp API request failed before receiving a successful response.",
+        "reason" => inspect(reason)
+      }
+    }
+  end
+
   defp tool_error_payload(reason) do
     %{
       "error" => %{
-        "message" => "Linear GraphQL tool execution failed.",
+        "message" => "Tool execution failed.",
         "reason" => inspect(reason)
       }
     }

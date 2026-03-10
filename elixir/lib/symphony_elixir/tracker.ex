@@ -39,6 +39,7 @@ defmodule SymphonyElixir.Tracker do
   @spec adapter() :: module()
   def adapter do
     case Config.tracker_kind() do
+      "clickup" -> SymphonyElixir.ClickUp.Adapter
       "memory" -> SymphonyElixir.Tracker.Memory
       _ -> SymphonyElixir.Linear.Adapter
     end
