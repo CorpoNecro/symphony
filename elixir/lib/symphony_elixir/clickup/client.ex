@@ -142,6 +142,13 @@ defmodule SymphonyElixir.ClickUp.Client do
     normalize_task(task, assignee_filter)
   end
 
+  @doc false
+  @spec decode_task_list_response_for_test(map() | String.t(), map() | nil) ::
+          {:ok, [Issue.t()]} | {:error, term()}
+  def decode_task_list_response_for_test(body, assignee_filter \\ nil) do
+    decode_task_list_response(body, assignee_filter)
+  end
+
   # -- Private: Fetching --
 
   defp do_fetch_by_statuses(list_id, status_names, assignee_filter) do
@@ -248,9 +255,9 @@ defmodule SymphonyElixir.ClickUp.Client do
     {:ok, issues}
   end
 
-  defp decode_task_list_response(body, _assignee_filter) when is_binary(body) do
+  defp decode_task_list_response(body, assignee_filter) when is_binary(body) do
     case Jason.decode(body) do
-      {:ok, decoded} -> decode_task_list_response(decoded, nil)
+      {:ok, decoded} -> decode_task_list_response(decoded, assignee_filter)
       {:error, _reason} -> {:error, :clickup_invalid_json}
     end
   end
@@ -391,6 +398,14 @@ defmodule SymphonyElixir.ClickUp.Client do
 
   defp do_request(:put, url, %{headers: headers, body: body}) do
     Req.put(url,
+      headers: headers,
+      json: body || %{},
+      connect_options: [timeout: 30_000]
+    )
+  end
+
+  defp do_request(:delete, url, %{headers: headers, body: body}) do
+    Req.delete(url,
       headers: headers,
       json: body || %{},
       connect_options: [timeout: 30_000]

@@ -113,4 +113,24 @@ defmodule SymphonyElixir.ClickUp.ClientTest do
 
     assert {:error, :missing_clickup_list_id} = Client.fetch_candidate_issues()
   end
+
+  test "decode_task_list_response_for_test preserves assignee filter for binary payloads" do
+    body = Jason.encode!(%{"tasks" => [@sample_task]})
+
+    assert {:ok, [issue]} = Client.decode_task_list_response_for_test(body, "99999")
+    assert issue.assigned_to_worker == false
+
+    assert {:ok, [matching_issue]} = Client.decode_task_list_response_for_test(body, "12345")
+    assert matching_issue.assigned_to_worker == true
+  end
+
+  test "api_request supports delete through the default dispatcher" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "clickup",
+      tracker_api_token: "ck_test_token",
+      tracker_endpoint: "http://127.0.0.1:1"
+    )
+
+    assert {:error, _reason} = Client.api_request(:delete, "/task/abc123")
+  end
 end
