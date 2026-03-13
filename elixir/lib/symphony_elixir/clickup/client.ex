@@ -149,6 +149,14 @@ defmodule SymphonyElixir.ClickUp.Client do
     decode_task_list_response(body, assignee_filter)
   end
 
+  @doc false
+  @spec build_assignee_filter_for_test(String.t(), (atom(), String.t() -> {:ok, map()} | {:error, term()})) ::
+          {:ok, map() | nil} | {:error, term()}
+  def build_assignee_filter_for_test(assignee, api_request_fun \\ &api_request/2)
+      when is_binary(assignee) and is_function(api_request_fun, 2) do
+    build_assignee_filter(assignee, api_request_fun)
+  end
+
   # -- Private: Fetching --
 
   defp do_fetch_by_statuses(list_id, status_names, assignee_filter) do
@@ -284,7 +292,7 @@ defmodule SymphonyElixir.ClickUp.Client do
       assignee_id: assignee_field(primary_assignee, "id"),
       blocked_by: extract_dependencies(task),
       labels: extract_tags(task),
-      assigned_to_worker: assigned_to_worker?(primary_assignee, assignee_filter),
+      assigned_to_worker: assigned_to_worker?(assignees, assignee_filter),
       created_at: parse_unix_ms(task["date_created"]),
       updated_at: parse_unix_ms(task["date_updated"])
     }
@@ -297,15 +305,36 @@ defmodule SymphonyElixir.ClickUp.Client do
 
   defp assigned_to_worker?(_assignee, nil), do: true
 
+  defp assigned_to_worker?(assignees, %{match_values: match_values})
+       when is_list(assignees) and is_struct(match_values, MapSet) do
+    Enum.any?(assignees, fn
+      %{} = assignee ->
+        case assignee_id(assignee) do
+          nil -> false
+          assignee_id -> MapSet.member?(match_values, assignee_id)
+        end
+
+      _ ->
+        false
+    end)
+  end
+
   defp assigned_to_worker?(%{} = assignee, %{match_values: match_values})
        when is_struct(match_values, MapSet) do
-    case normalize_assignee_match_value(to_string(assignee["id"] || "")) do
+    case assignee_id(assignee) do
       nil -> false
       assignee_id -> MapSet.member?(match_values, assignee_id)
     end
   end
 
   defp assigned_to_worker?(_assignee, _assignee_filter), do: false
+
+  defp assignee_id(%{} = assignee) do
+    assignee
+    |> Map.get("id")
+    |> to_string()
+    |> normalize_assignee_match_value()
+  end
 
   defp extract_tags(%{"tags" => tags}) when is_list(tags) do
     tags
@@ -425,12 +454,17 @@ defmodule SymphonyElixir.ClickUp.Client do
   end
 
   defp build_assignee_filter(assignee) when is_binary(assignee) do
+    build_assignee_filter(assignee, &api_request/2)
+  end
+
+  defp build_assignee_filter(assignee, api_request_fun)
+       when is_binary(assignee) and is_function(api_request_fun, 2) do
     case normalize_assignee_match_value(assignee) do
       nil ->
         {:ok, nil}
 
       "me" ->
-        resolve_viewer_assignee_filter()
+        resolve_viewer_assignee_filter(api_request_fun)
 
       normalized ->
         {:ok, %{configured_assignee: assignee, match_values: MapSet.new([normalized])}}
@@ -438,30 +472,18 @@ defmodule SymphonyElixir.ClickUp.Client do
   end
 
   defp resolve_viewer_assignee_filter do
-    case api_request(:get, "/team") do
-      {:ok, %{status: 200, body: %{"teams" => [team | _]}}} ->
-        members = team["members"] || []
+    resolve_viewer_assignee_filter(&api_request/2)
+  end
 
-        case find_current_user_id(members) do
+  defp resolve_viewer_assignee_filter(api_request_fun) when is_function(api_request_fun, 2) do
+    case api_request_fun.(:get, "/user") do
+      {:ok, %{status: 200, body: body}} ->
+        case extract_viewer_id(body) do
           nil ->
             {:error, :missing_clickup_viewer_identity}
 
           viewer_id ->
             {:ok, %{configured_assignee: "me", match_values: MapSet.new([viewer_id])}}
-        end
-
-      {:ok, %{status: 200, body: body}} when is_binary(body) ->
-        case Jason.decode(body) do
-          {:ok, %{"teams" => [team | _]}} ->
-            members = team["members"] || []
-
-            case find_current_user_id(members) do
-              nil -> {:error, :missing_clickup_viewer_identity}
-              viewer_id -> {:ok, %{configured_assignee: "me", match_values: MapSet.new([viewer_id])}}
-            end
-
-          _ ->
-            {:error, :missing_clickup_viewer_identity}
         end
 
       {:ok, _body} ->
@@ -472,14 +494,17 @@ defmodule SymphonyElixir.ClickUp.Client do
     end
   end
 
-  defp find_current_user_id(_members) do
-    # ClickUp's /team endpoint returns members but doesn't directly indicate
-    # the current user. When team_id is set, we use it to identify the workspace.
-    # For "me" filtering, users should specify their numeric user ID or email
-    # in the assignee field instead of "me".
-    # This is a limitation compared to Linear's viewer query.
-    nil
+  defp extract_viewer_id(%{"user" => %{} = user}), do: assignee_id(user)
+  defp extract_viewer_id(%{"id" => _id} = payload), do: assignee_id(payload)
+
+  defp extract_viewer_id(body) when is_binary(body) do
+    case Jason.decode(body) do
+      {:ok, decoded} -> extract_viewer_id(decoded)
+      {:error, _reason} -> nil
+    end
   end
+
+  defp extract_viewer_id(_body), do: nil
 
   defp normalize_assignee_match_value(value) when is_binary(value) do
     case String.trim(value) do

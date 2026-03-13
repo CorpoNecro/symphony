@@ -85,6 +85,17 @@ defmodule SymphonyElixir.ClickUp.ClientTest do
     assert issue_wrong.assigned_to_worker == false
   end
 
+  test "normalize_task_for_test with assignee filter matches any assignee on the task" do
+    task_with_multiple_assignees =
+      Map.put(@sample_task, "assignees", [
+        %{"id" => "11111", "username" => "alice"},
+        %{"id" => "12345", "username" => "bob"}
+      ])
+
+    issue = Client.normalize_task_for_test(task_with_multiple_assignees, "12345")
+    assert issue.assigned_to_worker == true
+  end
+
   test "normalize_task_for_test handles dependencies" do
     task =
       Map.put(@sample_task, "dependencies", [
@@ -132,5 +143,15 @@ defmodule SymphonyElixir.ClickUp.ClientTest do
     )
 
     assert {:error, _reason} = Client.api_request(:delete, "/task/abc123")
+  end
+
+  test "build_assignee_filter_for_test resolves me from the current ClickUp user payload" do
+    assert {:ok, %{configured_assignee: "me", match_values: match_values}} =
+             Client.build_assignee_filter_for_test("me", fn
+               :get, "/user" ->
+                 {:ok, %{status: 200, body: %{"user" => %{"id" => 42_424}}}}
+             end)
+
+    assert MapSet.member?(match_values, "42424")
   end
 end
