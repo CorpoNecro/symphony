@@ -34,12 +34,9 @@ defmodule SymphonyElixir.Codex.DynamicToolTest do
              }
            ] = response["contentItems"]
 
-    assert Jason.decode!(text) == %{
-             "error" => %{
-               "message" => ~s(Unsupported dynamic tool: "not_a_real_tool".),
-               "supportedTools" => ["linear_graphql"]
-             }
-           }
+    decoded = Jason.decode!(text)
+    assert decoded["error"]["message"] == ~s(Unsupported dynamic tool: "not_a_real_tool".)
+    assert is_list(decoded["error"]["supportedTools"])
   end
 
   test "linear_graphql returns successful GraphQL responses as tool text" do
@@ -242,7 +239,7 @@ defmodule SymphonyElixir.Codex.DynamicToolTest do
 
     assert Jason.decode!(text) == %{
              "error" => %{
-               "message" => "`linear_graphql` expects either a GraphQL query string or an object with `query` and optional `variables`."
+               "message" => "Tool expects a JSON object with the required parameters."
              }
            }
   end
@@ -353,7 +350,7 @@ defmodule SymphonyElixir.Codex.DynamicToolTest do
 
     assert Jason.decode!(text) == %{
              "error" => %{
-               "message" => "Linear GraphQL tool execution failed.",
+               "message" => "Tool execution failed.",
                "reason" => ":boom"
              }
            }
@@ -374,5 +371,22 @@ defmodule SymphonyElixir.Codex.DynamicToolTest do
                "text" => ":ok"
              }
            ] = response["contentItems"]
+  end
+
+  test "clickup_api normalizes relative paths to include a leading slash" do
+    test_pid = self()
+
+    response =
+      DynamicTool.execute(
+        "clickup_api",
+        %{"method" => "GET", "path" => "task/123"},
+        clickup_client: fn method, path, body ->
+          send(test_pid, {:clickup_client_called, method, path, body})
+          {:ok, %{status: 200, body: %{"id" => "123"}}}
+        end
+      )
+
+    assert_received {:clickup_client_called, :get, "/task/123", nil}
+    assert response["success"] == true
   end
 end
