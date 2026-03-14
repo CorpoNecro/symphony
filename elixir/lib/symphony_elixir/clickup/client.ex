@@ -159,7 +159,7 @@ defmodule SymphonyElixir.ClickUp.Client do
 
   @doc false
   @spec do_fetch_tasks_by_ids_for_test([String.t()], map() | nil, (String.t() -> {:ok, map()} | {:error, term()})) ::
-          {:ok, [Issue.t()]}
+          {:ok, [Issue.t()]} | {:error, term()}
   def do_fetch_tasks_by_ids_for_test(ids, assignee_filter, fetch_task_fun)
       when is_list(ids) and is_function(fetch_task_fun, 1) do
     do_fetch_tasks_by_ids(ids, assignee_filter, fetch_task_fun)
@@ -252,7 +252,11 @@ defmodule SymphonyElixir.ClickUp.Client do
       |> Enum.map(&normalize_task(&1, assignee_filter))
       |> Enum.reject(&is_nil/1)
 
-    {:ok, tasks}
+    if single_id_refresh_failed?(ids, tasks, skipped) do
+      {:error, single_id_refresh_failure_reason(skipped)}
+    else
+      {:ok, tasks}
+    end
   end
 
   defp fetch_single_task(task_id) do
@@ -548,6 +552,19 @@ defmodule SymphonyElixir.ClickUp.Client do
         "ClickUp task refresh skipped task_id=#{inspect(id)} reason=#{inspect(reason)}"
       )
     end)
+  end
+
+  defp single_id_refresh_failed?(ids, tasks, skipped)
+       when is_list(ids) and is_list(tasks) and is_list(skipped) do
+    length(ids) == 1 and tasks == [] and skipped != []
+  end
+
+  defp single_id_refresh_failure_reason(skipped) when is_list(skipped) do
+    case Enum.reverse(skipped) do
+      [{_id, {:task_exit, _reason}} | _] -> :task_fetch_timeout
+      [{_id, reason} | _] -> reason
+      _ -> :task_fetch_timeout
+    end
   end
 
   # -- Private: Error helpers --

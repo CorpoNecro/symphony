@@ -201,4 +201,22 @@ defmodule SymphonyElixir.ClickUp.ClientTest do
 
     assert Enum.map(issues, & &1.id) == ["abc123"]
   end
+
+  test "do_fetch_tasks_by_ids_for_test returns error for failed single-task refresh" do
+    assert {:error, {:clickup_api_status, 503}} =
+             Client.do_fetch_tasks_by_ids_for_test(
+               ["abc123"],
+               nil,
+               fn "abc123" -> {:error, {:clickup_api_status, 503}} end
+             )
+  end
+
+  test "do_fetch_tasks_by_ids_for_test returns timeout error for single-task worker exit" do
+    assert {:error, :task_fetch_timeout} =
+             Client.do_fetch_tasks_by_ids_for_test(
+               ["abc123"],
+               nil,
+               fn "abc123" -> exit(:timeout) end
+             )
+  end
 end
