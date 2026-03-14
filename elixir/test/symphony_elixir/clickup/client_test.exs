@@ -75,6 +75,18 @@ defmodule SymphonyElixir.ClickUp.ClientTest do
     assert issue.priority == nil
   end
 
+  test "normalize_task_for_test handles invalid unix timestamps without raising" do
+    task =
+      @sample_task
+      |> Map.put("date_created", "999999999999999999999999999999")
+      |> Map.put("date_updated", 999_999_999_999_999_999_999_999_999_999)
+
+    issue = Client.normalize_task_for_test(task)
+
+    assert issue.created_at == nil
+    assert issue.updated_at == nil
+  end
+
   test "normalize_task_for_test with assignee filter" do
     issue = Client.normalize_task_for_test(@sample_task, "12345")
 

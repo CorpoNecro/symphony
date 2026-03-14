@@ -378,13 +378,16 @@ defmodule SymphonyElixir.ClickUp.Client do
 
   defp parse_unix_ms(ms) when is_binary(ms) do
     case Integer.parse(ms) do
-      {unix_ms, _} -> DateTime.from_unix!(unix_ms, :millisecond)
+      {unix_ms, _} -> parse_unix_ms(unix_ms)
       :error -> nil
     end
   end
 
   defp parse_unix_ms(ms) when is_integer(ms) do
-    DateTime.from_unix!(ms, :millisecond)
+    case DateTime.from_unix(ms, :millisecond) do
+      {:ok, datetime} -> datetime
+      {:error, _reason} -> nil
+    end
   end
 
   defp parse_unix_ms(_), do: nil

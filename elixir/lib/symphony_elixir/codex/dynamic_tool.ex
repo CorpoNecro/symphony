@@ -172,7 +172,8 @@ defmodule SymphonyElixir.Codex.DynamicTool do
   defp validate_path(path) when is_binary(path) do
     case String.trim(path) do
       "" -> {:error, :missing_path}
-      trimmed -> {:ok, trimmed}
+      "/" <> _ = trimmed -> {:ok, trimmed}
+      trimmed -> {:ok, "/" <> trimmed}
     end
   end
 

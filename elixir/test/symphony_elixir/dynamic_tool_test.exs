@@ -372,4 +372,21 @@ defmodule SymphonyElixir.Codex.DynamicToolTest do
              }
            ] = response["contentItems"]
   end
+
+  test "clickup_api normalizes relative paths to include a leading slash" do
+    test_pid = self()
+
+    response =
+      DynamicTool.execute(
+        "clickup_api",
+        %{"method" => "GET", "path" => "task/123"},
+        clickup_client: fn method, path, body ->
+          send(test_pid, {:clickup_client_called, method, path, body})
+          {:ok, %{status: 200, body: %{"id" => "123"}}}
+        end
+      )
+
+    assert_received {:clickup_client_called, :get, "/task/123", nil}
+    assert response["success"] == true
+  end
 end
