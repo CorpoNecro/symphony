@@ -166,4 +166,39 @@ defmodule SymphonyElixir.ClickUp.ClientTest do
 
     assert MapSet.member?(match_values, "42424")
   end
+
+  test "do_fetch_tasks_by_ids_for_test continues when one task refresh fails" do
+    second_task =
+      @sample_task
+      |> Map.put("id", "xyz789")
+      |> Map.put("custom_id", "TASK-99")
+      |> Map.put("name", "Second task")
+
+    assert {:ok, issues} =
+             Client.do_fetch_tasks_by_ids_for_test(
+               ["abc123", "missing-task", "xyz789"],
+               nil,
+               fn
+                 "abc123" -> {:ok, @sample_task}
+                 "missing-task" -> {:error, {:clickup_api_status, 404}}
+                 "xyz789" -> {:ok, second_task}
+               end
+             )
+
+    assert Enum.map(issues, & &1.id) == ["abc123", "xyz789"]
+  end
+
+  test "do_fetch_tasks_by_ids_for_test returns remaining tasks when one worker exits" do
+    assert {:ok, issues} =
+             Client.do_fetch_tasks_by_ids_for_test(
+               ["abc123", "crash-task"],
+               nil,
+               fn
+                 "abc123" -> {:ok, @sample_task}
+                 "crash-task" -> exit(:timeout)
+               end
+             )
+
+    assert Enum.map(issues, & &1.id) == ["abc123"]
+  end
 end
