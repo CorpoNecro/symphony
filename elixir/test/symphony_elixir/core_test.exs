@@ -132,6 +132,28 @@ defmodule SymphonyElixir.CoreTest do
     assert Config.linear_assignee() == env_assignee
   end
 
+  test "tracker assignee resolves from workflow config when env overrides are unset" do
+    previous_linear_assignee = System.get_env("LINEAR_ASSIGNEE")
+    previous_clickup_assignee = System.get_env("CLICKUP_ASSIGNEE")
+
+    on_exit(fn ->
+      restore_env("LINEAR_ASSIGNEE", previous_linear_assignee)
+      restore_env("CLICKUP_ASSIGNEE", previous_clickup_assignee)
+    end)
+
+    System.delete_env("LINEAR_ASSIGNEE")
+    System.delete_env("CLICKUP_ASSIGNEE")
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_assignee: "worker-123",
+      tracker_project_slug: "project",
+      codex_command: "/bin/sh app-server"
+    )
+
+    assert Config.linear_assignee() == "worker-123"
+    assert Config.clickup_assignee() == "worker-123"
+  end
+
   test "workflow file path defaults to WORKFLOW.md in the current working directory when app env is unset" do
     original_workflow_path = Workflow.workflow_file_path()
 
