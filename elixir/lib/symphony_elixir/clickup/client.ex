@@ -165,23 +165,48 @@ defmodule SymphonyElixir.ClickUp.Client do
     do_fetch_tasks_by_ids(ids, assignee_filter, fetch_task_fun)
   end
 
+  @doc false
+  @spec do_fetch_by_statuses_for_test(
+          String.t(),
+          [String.t()],
+          map() | nil,
+          (atom(), String.t() -> {:ok, map()} | {:error, term()})
+        ) :: {:ok, [Issue.t()]} | {:error, term()}
+  def do_fetch_by_statuses_for_test(list_id, status_names, assignee_filter, api_request_fun)
+      when is_binary(list_id) and is_list(status_names) and is_function(api_request_fun, 2) do
+    do_fetch_by_statuses(list_id, status_names, assignee_filter, api_request_fun)
+  end
+
   # -- Private: Fetching --
 
   defp do_fetch_by_statuses(list_id, status_names, assignee_filter) do
-    do_fetch_by_statuses_page(list_id, status_names, assignee_filter, 0, [])
+    do_fetch_by_statuses(list_id, status_names, assignee_filter, &api_request/2)
   end
 
-  defp do_fetch_by_statuses_page(list_id, status_names, assignee_filter, page, acc) do
+  defp do_fetch_by_statuses(list_id, status_names, assignee_filter, api_request_fun)
+       when is_function(api_request_fun, 2) do
+    do_fetch_by_statuses_page(list_id, status_names, assignee_filter, 0, [], api_request_fun)
+  end
+
+  defp do_fetch_by_statuses_page(list_id, status_names, assignee_filter, page, acc, api_request_fun) do
     query_string = build_task_query_string(page, status_names)
 
-    case api_request(:get, "/list/#{list_id}/task?#{query_string}") do
+    case api_request_fun.(:get, "/list/#{list_id}/task?#{query_string}") do
       {:ok, %{status: 200, body: body}} ->
         case decode_task_list_response(body, assignee_filter) do
           {:ok, tasks} ->
             updated_acc = Enum.reverse(tasks, acc)
+            raw_task_count = raw_task_count(body)
 
-            if length(tasks) >= @task_page_size do
-              do_fetch_by_statuses_page(list_id, status_names, assignee_filter, page + 1, updated_acc)
+            if raw_task_count >= @task_page_size do
+              do_fetch_by_statuses_page(
+                list_id,
+                status_names,
+                assignee_filter,
+                page + 1,
+                updated_acc,
+                api_request_fun
+              )
             else
               {:ok, Enum.reverse(updated_acc)}
             end
@@ -299,6 +324,17 @@ defmodule SymphonyElixir.ClickUp.Client do
   defp decode_task_list_response(_unknown, _assignee_filter) do
     {:error, :clickup_unknown_payload}
   end
+
+  defp raw_task_count(%{"tasks" => tasks}) when is_list(tasks), do: length(tasks)
+
+  defp raw_task_count(body) when is_binary(body) do
+    case Jason.decode(body) do
+      {:ok, decoded} -> raw_task_count(decoded)
+      {:error, _reason} -> 0
+    end
+  end
+
+  defp raw_task_count(_body), do: 0
 
   # -- Private: Task normalization --
 

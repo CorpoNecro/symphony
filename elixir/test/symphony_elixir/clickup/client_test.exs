@@ -219,4 +219,47 @@ defmodule SymphonyElixir.ClickUp.ClientTest do
                fn "abc123" -> exit(:timeout) end
              )
   end
+
+  test "do_fetch_by_statuses_for_test paginates using raw ClickUp page size" do
+    page_zero_tasks =
+      Enum.map(1..99, fn index ->
+        %{
+          "id" => "p0-#{index}",
+          "name" => "Page 0 Task #{index}",
+          "status" => %{"status" => "todo"},
+          "assignees" => []
+        }
+      end) ++ [nil]
+
+    page_one_tasks = [
+      %{
+        "id" => "p1-1",
+        "name" => "Page 1 Task 1",
+        "status" => %{"status" => "todo"},
+        "assignees" => []
+      }
+    ]
+
+    assert {:ok, issues} =
+             Client.do_fetch_by_statuses_for_test(
+               "list-123",
+               ["todo"],
+               nil,
+               fn
+                 :get, path ->
+                   cond do
+                     String.contains?(path, "page=0") ->
+                       {:ok, %{status: 200, body: %{"tasks" => page_zero_tasks}}}
+
+                     String.contains?(path, "page=1") ->
+                       {:ok, %{status: 200, body: %{"tasks" => page_one_tasks}}}
+
+                     true ->
+                       flunk("unexpected page path: #{path}")
+                    end
+               end
+             )
+
+    assert Enum.any?(issues, &(&1.id == "p1-1"))
+  end
 end

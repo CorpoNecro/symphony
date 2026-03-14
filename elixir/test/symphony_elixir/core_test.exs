@@ -132,6 +132,16 @@ defmodule SymphonyElixir.CoreTest do
     assert Config.linear_assignee() == env_assignee
   end
 
+  test "clickup validation rejects blank list ids" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "clickup",
+      tracker_api_token: "ck_test_token",
+      tracker_list_id: "   "
+    )
+
+    assert {:error, :missing_clickup_list_id} = Config.validate!()
+  end
+
   test "tracker assignee resolves from workflow config when env overrides are unset" do
     previous_linear_assignee = System.get_env("LINEAR_ASSIGNEE")
     previous_clickup_assignee = System.get_env("CLICKUP_ASSIGNEE")

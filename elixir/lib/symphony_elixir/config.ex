@@ -487,7 +487,7 @@ defmodule SymphonyElixir.Config do
   end
 
   defp require_clickup_list do
-    if is_binary(clickup_list_id()) do
+    if present_binary?(clickup_list_id()) do
       :ok
     else
       {:error, :missing_clickup_list_id}
@@ -1009,4 +1009,10 @@ defmodule SymphonyElixir.Config do
   end
 
   defp normalize_secret_value(_value), do: nil
+
+  defp present_binary?(value) when is_binary(value) do
+    String.trim(value) != ""
+  end
+
+  defp present_binary?(_value), do: false
 end
